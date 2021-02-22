@@ -11,6 +11,8 @@ from codes.Mydatasets import dataset_call
 from codes.Myoptimizers import optimizer_call
 from codes.Mylr_schedule import lrschdule_call
 from pytorch_lightning.metrics.metric import Metric
+from torch.optim.swa_utils import AveragedModel
+from codes.Utils.Bn_updater import update_bn
 
 
 class Loss_Metric(Metric):
@@ -48,7 +50,8 @@ class Accuracy_Metric(Metric):
 
 
 from codes.Myloss_function import loss_call
-from codes.Mytransforms import FMix, Cutmix
+
+from codes.Mymixway import FMix, Cutmix, training_call
 
 
 class LitMNIST(LightningModule):
@@ -64,20 +67,23 @@ class LitMNIST(LightningModule):
         self.val_loss = Loss_Metric(compute_on_step=False)
         self.train_Accuracy = Accuracy_Metric(compute_on_step=False)
         self.val_Accuracy = Accuracy_Metric(compute_on_step=False)
-        self.cutmix = False
-        self.cutmix_fun = Cutmix(beta=1, prob=1, loss_fc=self.loss_fc)
-        self.Fmix = False
-        self.Fmix_fun = FMix(loss_fc=self.loss_fc)
-        assert not (self.cutmix and self.Fmix)
+        kwargs['training_way']['training_way_args']['loss_fc'] = self.loss_fc
+        self.training_way = training_call(kwargs['training_way'])
+        # SWA
+        self.SWA_enable = kwargs['lrschdule_entity']['SWA']['SWA_enable']
+        self.SWA_start_epoch = kwargs['lrschdule_entity']['SWA']['SWA_start_epoch']
+        self.epoch_count = 0
+        if self.SWA_enable:
+            self.SWA_model = AveragedModel(self.model_layer)
 
     def train_dataloader(self):
         dataset_train = dataset_call(flag='train', kwargs=self.dataset_entity)
-        self.train_loder = DataLoader(dataset_train, batch_size=self.dataloader_entity['batch_size'],
-                                      shuffle=self.dataloader_entity['shuffle'],
-                                      num_workers=self.dataloader_entity['num_wokers'],
-                                      drop_last=self.dataloader_entity['drop_last']
-                                      )
-        return self.train_loder
+
+        return DataLoader(dataset_train, batch_size=self.dataloader_entity['batch_size'],
+                          shuffle=self.dataloader_entity['shuffle'],
+                          num_workers=self.dataloader_entity['num_wokers'],
+                          drop_last=self.dataloader_entity['drop_last']
+                          )
 
     def val_dataloader(self):
         dataset_val = dataset_call(flag='test', kwargs=self.dataset_entity)
@@ -97,55 +103,14 @@ class LitMNIST(LightningModule):
         x = self.model_layer(data)
         return x
 
-    def rand_bbox(self, size, lam):
-        W = size[2]
-        H = size[3]
-        cut_rat = np.sqrt(1. - lam)
-        cut_w = np.int(W * cut_rat)
-        cut_h = np.int(H * cut_rat)
-
-        # uniform
-        cx = np.random.randint(W)
-        cy = np.random.randint(H)
-
-        bbx1 = np.clip(cx - cut_w // 2, 0, W)
-        bby1 = np.clip(cy - cut_h // 2, 0, H)
-        bbx2 = np.clip(cx + cut_w // 2, 0, W)
-        bby2 = np.clip(cy + cut_h // 2, 0, H)
-
-        return bbx1, bby1, bbx2, bby2
-
     def step(self, batch):
         data, label = batch[:-1], batch[-1]
         if len(data) == 1:
             data = data[0]
-        if self.training:
-            assert not (self.cutmix and self.Fmix)
-            if self.cutmix:
-                data = self.cutmix_fun(data, label)
-                # compute output
-                logits = self(data)
-                loss = self.cutmix_fun.loss(logits, label)
-            elif self.Fmix:
-                data = self.Fmix_fun(data)
-                logits = self(data)
-                loss = self.Fmix_fun.loss(logits, label)
-            else:
-                logits = self(data)
-                loss = self.loss_fc(logits, label)
-
-        else:
-            # compute output
-            logits = self(data)
-            loss = self.loss_fc(logits, label)
+        logits, loss = self.training_way(self, data, label, self.training)
         return loss, logits, label
 
     def training_step(self, batch, batch_idx):
-        # input_ids, token_type_ids, attention_mask, y = batch
-        # data_dict = {'input_ids': input_ids, 'token_type_ids': token_type_ids, 'attention_mask': attention_mask}
-        # logits = self(data_dict)
-        # # compute loss
-        # loss = self.loss_fc(logits, y)
         loss, logits, y = self.step(batch)
         # add log
         self.log('train_loss_step', loss, on_step=True, on_epoch=False, prog_bar=False, logger=True)
@@ -159,13 +124,11 @@ class LitMNIST(LightningModule):
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.train_loss.reset()
         self.train_Accuracy.reset()
+        self.epoch_count += 1
+        if self.SWA_enable and self.epoch_count >= self.SWA_start_epoch:
+            self.SWA_model.update_parameters(self.model_layer)
 
     def validation_step(self, batch, batch_idx):
-        # input_ids, token_type_ids, attention_mask, y = batch
-        # data_dict = {'input_ids': input_ids, 'token_type_ids': token_type_ids, 'attention_mask': attention_mask}
-        # logits = self(data_dict)
-        # # compute loss
-        # loss = self.loss_fc(logits, y)
         loss, logits, y = self.step(batch)
         # add log
         self.val_loss(loss, len(y))
@@ -180,7 +143,6 @@ class LitMNIST(LightningModule):
 
 
 from sklearn.model_selection import StratifiedKFold
-import numpy as np
 import pandas as pd
 import scikitplot as skplt
 import matplotlib.pyplot as plt
@@ -226,7 +188,10 @@ def plot_confusion_matrix(pred, target, normalize, save_path):
 
 if __name__ == "__main__":
 
-    config_path = r'/home/xjz/Desktop/Coding/PycharmProjects/competition/kaggle/cassava_leaf_disease_classification/configs/efficientnetb2Ranger_labelsmooth.py'
+    config_dir = r'/home/xjz/Desktop/Coding/PycharmProjects/competition/kaggle/cassava_leaf_disease_classification/configs'
+    cofig_name = 'efficientnetb3Ranger_labelsmooth.py'
+    # cofig_name = 'debug.py'
+    config_path = os.path.join(config_dir, cofig_name)
     seed_everything(2020)
     # get config
     cfg = Config.fromfile(config_path)
@@ -244,42 +209,48 @@ if __name__ == "__main__":
     # for  loop  code
     for n_fold, (train_index, test_index) in enumerate(index_generator, start=1):
         #  testing
-        if n_fold <= 2:
-            if cfg.Train_mode is False:
-                train_index = train_index[:200]
-                test_index = test_index[:200]
-            cfg['dataset_entity']['train_csv'] = csv.iloc[train_index]
-            cfg['dataset_entity']['test_csv'] = csv.iloc[test_index]
 
-            model = LitMNIST(cfg)
-            checkpoint_callback = pl.callbacks.ModelCheckpoint(**cfg.logger_entity.ModelCheckpoint)
-            tb_logger = loggers.TensorBoardLogger(save_dir=cfg.logger_entity['weight_savepath'], name=experiment_name,
-                                                  version='fold_{}'.format(n_fold))
-            cfg.trainer_entity['checkpoint_callback'] = checkpoint_callback
-            cfg.trainer_entity['logger'] = tb_logger
-            trainer = Trainer(**cfg.trainer_entity)
-            trainer.fit(model)
-            if cfg.Train_mode is not None:
-                model_pth_name = os.path.basename(checkpoint_callback.best_model_path)
-                best_model_path = checkpoint_callback.best_model_path.replace(model_pth_name, 'best.ckpt')
+        if cfg.Train_mode is False:
+            train_index = train_index[:200]
+            test_index = test_index[:200]
+        cfg['dataset_entity']['train_csv'] = csv.iloc[train_index]
+        cfg['dataset_entity']['test_csv'] = csv.iloc[test_index]
+
+        model = LitMNIST(cfg)
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(**cfg.logger_entity.ModelCheckpoint)
+        tb_logger = loggers.TensorBoardLogger(save_dir=cfg.logger_entity['weight_savepath'], name=experiment_name,
+                                              version='fold_{}'.format(n_fold))
+        cfg.trainer_entity['checkpoint_callback'] = checkpoint_callback
+        cfg.trainer_entity['logger'] = tb_logger
+        trainer = Trainer(**cfg.trainer_entity)
+        trainer.fit(model)
+        if cfg.Train_mode is not None:
+            model_pth_name = os.path.basename(checkpoint_callback.best_model_path)
+            best_model_path = checkpoint_callback.best_model_path.replace(model_pth_name, 'best.ckpt')
+            if model.SWA_enable:
+                print('SWA save')
+                update_bn(trainer.train_dataloader, model.SWA_model)
+                model.model_layer.load_state_dict(model.SWA_model.module.state_dict())
+            else:
                 model.load_state_dict(torch.load(checkpoint_callback.best_model_path)['state_dict'], strict=True)
-                torch.save({"state_dict": model.model_layer.state_dict()}, best_model_path)
-                # delete original
-                os.remove(checkpoint_callback.best_model_path)
-                # confusion matrix
-                pred, target = inferrence(model.model_layer, copy.deepcopy(trainer.val_dataloaders[0]))
+            torch.save({"state_dict": model.model_layer.state_dict()}, best_model_path)
 
-                plot_confusion_matrix(pred, target, normalize=False,
-                                      save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-                                                             'confusion_matrix.jpg'))
-                plot_confusion_matrix(pred, target, normalize=True,
-                                      save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-                                                             'confusion_matrix_normalize.jpg'))
-                # add pred and target to global
-                pred_list.extend(pred)
-                target_list.extend(target)
+            # delete original
+            os.remove(checkpoint_callback.best_model_path)
+            # confusion matrix
+            pred, target = inferrence(model.model_layer, copy.deepcopy(trainer.val_dataloaders[0]))
 
-            del model, trainer, checkpoint_callback
+            plot_confusion_matrix(pred, target, normalize=False,
+                                  save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+                                                         'confusion_matrix.jpg'))
+            plot_confusion_matrix(pred, target, normalize=True,
+                                  save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+                                                         'confusion_matrix_normalize.jpg'))
+            # add pred and target to global
+            pred_list.extend(pred)
+            target_list.extend(target)
+
+        del model, trainer, checkpoint_callback
     plot_confusion_matrix(pred_list, target_list, normalize=False,
                           save_path=os.path.join(weight_folder, 'global_confusion_matrix.jpg'))
     plot_confusion_matrix(pred_list, target_list, normalize=True,

@@ -1,3 +1,13 @@
+# Created by .ignore support plugin (hsz.mobi)
+### Example user template template
+### Example user template
+
+# IntelliJ project files
+.idea
+.model_weights
+*.iml
+out
+gen
 将删除 Preworks/__pycache__/
 将删除 codes/Mydatasets/__pycache__/
 将删除 codes/Myloss_function/__pycache__/
@@ -8,11 +18,3 @@
 将删除 codes/Mytransforms/__pycache__/
 将删除 codes/__pycache__/
 将删除 result/
-### Example user template template
-### Example user template
-
-# IntelliJ project files
-.idea
-*.iml
-out
-gen
