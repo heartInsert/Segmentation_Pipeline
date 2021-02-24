@@ -8,6 +8,7 @@
 *.iml
 out
 gen
+Results
 将删除 Preworks/__pycache__/
 将删除 codes/Mydatasets/__pycache__/
 将删除 codes/Myloss_function/__pycache__/

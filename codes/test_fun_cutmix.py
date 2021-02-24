@@ -13,6 +13,114 @@ from codes.Mylr_schedule import lrschdule_call
 from pytorch_lightning.metrics.metric import Metric
 from torch.optim.swa_utils import AveragedModel
 from codes.Utils.Bn_updater import update_bn
+from typing import Optional, List
+
+import torch
+import torch.nn.functional as F
+from torch.nn.modules.loss import _Loss
+from segmentation_models_pytorch.losses.constants import BINARY_MODE, MULTICLASS_MODE, MULTILABEL_MODE
+from segmentation_models_pytorch.losses._functional import soft_jaccard_score, to_tensor
+
+
+class IOU_loss(_Loss):
+
+    def __init__(
+            self,
+            mode: str,
+            classes: Optional[List[int]] = None,
+            log_loss: bool = False,
+            from_logits: bool = True,
+            smooth: float = 0.,
+            eps: float = 1e-7,
+    ):
+        """Implementation of Jaccard loss for image segmentation task.
+        It supports binary, multiclass and multilabel cases
+
+        Args:
+            mode: Loss mode 'binary', 'multiclass' or 'multilabel'
+            classes:  List of classes that contribute in loss computation. By default, all channels are included.
+            log_loss: If True, loss computed as `- log(jaccard_coeff)`, otherwise `1 - jaccard_coeff`
+            from_logits: If True, assumes input is raw logits
+            smooth: Smoothness constant for dice coefficient
+            ignore_index: Label that indicates ignored pixels (does not contribute to loss)
+            eps: A small epsilon for numerical stability to avoid zero division error
+                (denominator will be always greater or equal to eps)
+
+        Shape
+             - **y_pred** - torch.Tensor of shape (N, C, H, W)
+             - **y_true** - torch.Tensor of shape (N, H, W) or (N, C, H, W)
+
+        Reference
+            https://github.com/BloodAxe/pytorch-toolbelt
+        """
+        assert mode in {BINARY_MODE, MULTILABEL_MODE, MULTICLASS_MODE}
+        super(IOU_loss, self).__init__()
+
+        self.mode = mode
+        if classes is not None:
+            assert mode != BINARY_MODE, "Masking classes is not supported with mode=binary"
+            classes = to_tensor(classes, dtype=torch.long)
+
+        self.classes = classes
+        self.from_logits = from_logits
+        self.smooth = smooth
+        self.eps = eps
+        self.log_loss = log_loss
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+
+        assert y_true.size(0) == y_pred.size(0)
+
+        if self.from_logits:
+            # Apply activations to get [0..1] class probabilities
+            # Using Log-Exp as this gives more numerically stable result and does not cause vanishing gradient on
+            # extreme values 0 and 1
+            if self.mode == MULTICLASS_MODE:
+                y_pred = y_pred.log_softmax(dim=1).exp()
+            else:
+                y_pred = F.logsigmoid(y_pred).exp()
+
+        bs = y_true.size(0)
+        num_classes = y_pred.size(1)
+        dims = (0, 2)
+
+        if self.mode == BINARY_MODE:
+            y_true = y_true.view(bs, 1, -1)
+            y_pred = y_pred.view(bs, 1, -1)
+
+        if self.mode == MULTICLASS_MODE:
+            y_true = y_true.view(bs, -1)
+            y_pred = y_pred.view(bs, num_classes, -1)
+            y_pred = y_pred.argmax(1)
+            y_pred = F.one_hot(y_pred, num_classes)  # N,H*W -> N,H*W, C
+            y_pred = y_pred.permute(0, 2, 1)  # H, C, H*W
+
+            y_true = F.one_hot(y_true, num_classes)  # N,H*W -> N,H*W, C
+            y_true = y_true.permute(0, 2, 1)  # H, C, H*W
+
+        if self.mode == MULTILABEL_MODE:
+            y_true = y_true.view(bs, num_classes, -1)
+            y_pred = y_pred.view(bs, num_classes, -1)
+
+        scores = soft_jaccard_score(y_pred, y_true.type(y_pred.dtype), smooth=self.smooth, eps=self.eps, dims=dims)
+
+        # if self.log_loss:
+        #     loss = -torch.log(scores.clamp_min(self.eps))
+        # else:
+        #     loss = 1.0 - scores
+
+        # IoU loss is defined for non-empty classes
+        # So we zero contribution of channel that does not have true pixels
+        # NOTE: A better workaround would be to use loss term `mean(y_pred)`
+        # for this case, however it will be a modified jaccard loss
+
+        mask = y_true.sum(dims) > 0
+        scores *= mask.float()
+
+        if self.classes is not None:
+            scores = scores[self.classes]
+
+        return scores.mean()
 
 
 class Loss_Metric(Metric):
@@ -31,22 +139,23 @@ class Loss_Metric(Metric):
         return self.loss.float() / self.total
 
 
-class Accuracy_Metric(Metric):
+class Iou_Metric(Metric):
     def __init__(self, compute_on_step: bool = True, dist_sync_on_step=False, process_group=None):
         super().__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step,
                          process_group=process_group)
-
-        self.add_state("num_acc", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.Iou_loss = IOU_loss(mode='multiclass')
+        self.add_state("Iou_Metric", default=torch.tensor(0).float(), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(1e-4), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        preds = preds.argmax(dim=1)
-        self.num_acc += (preds == target).sum()
-        self.total += len(target)
+        num = 10
+        loss = self.Iou_loss(preds, target)
+        self.Iou_Metric += loss.item() * num
+        self.total += num
 
     def compute(self):
-        accuracy = self.num_acc / self.total
-        return accuracy * 100
+        Iou_Metric = self.Iou_Metric / self.total
+        return Iou_Metric
 
 
 from codes.Myloss_function import loss_call
@@ -65,8 +174,10 @@ class LitMNIST(LightningModule):
         self.model_layer = model_call(kwargs['model_entity'])
         self.train_loss = Loss_Metric(compute_on_step=False)
         self.val_loss = Loss_Metric(compute_on_step=False)
-        self.train_Accuracy = Accuracy_Metric(compute_on_step=False)
-        self.val_Accuracy = Accuracy_Metric(compute_on_step=False)
+        self.wise_loss = {loss_fc['loss_name']: Loss_Metric(compute_on_step=False) for loss_fc in
+                          kwargs['loss_fc_entity']}
+        self.train_Accuracy = Iou_Metric(compute_on_step=False)
+        self.val_Accuracy = Iou_Metric(compute_on_step=False)
         kwargs['training_way']['training_way_args']['loss_fc'] = self.loss_fc
         self.training_way = training_call(kwargs['training_way'])
         # SWA
@@ -112,15 +223,16 @@ class LitMNIST(LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss, logits, y = self.step(batch)
+        loss_backward = loss['loss_backward']
         # add log
-        self.log('train_loss_step', loss, on_step=True, on_epoch=False, prog_bar=False, logger=True)
-        self.train_loss(loss, len(y))
-        self.train_Accuracy(logits, y)
-        return loss
+        self.log('train_loss_step', loss_backward, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+        self.train_loss(loss_backward.detach(), len(y))
+        self.train_Accuracy(logits.detach(), y)
+        return loss_backward
 
     def training_epoch_end(self, outputs):
         self.log('train_loss_epoch', self.train_loss.compute())
-        self.log('train_Accuracy_epoch', self.train_Accuracy.compute())
+        self.log('train_Iou_epoch', self.train_Accuracy.compute())
         self.log('lr', self.optimizers().param_groups[0]['lr'])
         self.train_loss.reset()
         self.train_Accuracy.reset()
@@ -131,34 +243,46 @@ class LitMNIST(LightningModule):
     def validation_step(self, batch, batch_idx):
         loss, logits, y = self.step(batch)
         # add log
-        self.val_loss(loss, len(y))
-        self.val_Accuracy(logits, y)
-        return loss
+        loss_backward = loss['loss_backward']
+        self.val_loss(loss_backward.detach(), len(y))
+        self.val_Accuracy(logits.detach(), y)
+        for key in loss['loss_wise']:
+            self.wise_loss[key](loss['loss_wise'][key], len(y))
+            pass
+
+        return loss_backward
 
     def validation_epoch_end(self, outputs):
         self.log('val_loss_epoch', self.val_loss.compute())
-        self.log('val_Accuracy_epoch', self.val_Accuracy.compute())
+        self.log('val_Iou_epoch', self.val_Accuracy.compute())
+        for key in self.wise_loss:
+            self.log('{}_epoch'.format(key), self.wise_loss[key].compute())
         self.val_loss.reset()
         self.val_Accuracy.reset()
+        for key in self.wise_loss:
+            self.wise_loss[key].reset()
 
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, KFold
 import pandas as pd
 import scikitplot as skplt
 import matplotlib.pyplot as plt
 import copy
+import glob
+import numpy as np
 
 
 def Get_fold_splits(fold, kwargs):
-    csv = pd.read_csv(kwargs['data_csv_path'])
-    labels = csv['label'].values
-    X = csv.values
-    y = labels
-    skl = StratifiedKFold(n_splits=fold, shuffle=True, random_state=2020)
+    generate = glob.glob(os.path.join(kwargs['data_csv_path'], '*.tif'))
+    X = np.ones([len(generate)])
+    skl = KFold(n_splits=fold, shuffle=True, random_state=2020)
     # for train, test in skl.split(X,y):
     #     print('Train: %s | test: %s' % (train, test),'\n')
 
-    index_generator = skl.split(X, y)
+    index_generator = skl.split(X)
+    file_list = [item for item in list(generate)]
+    label_list = [item.replace('tif', 'png') for item in file_list]
+    csv = pd.DataFrame(np.stack([file_list, label_list]).T, columns=['file_path', 'label_path'])
     return csv, index_generator
 
 
@@ -188,8 +312,8 @@ def plot_confusion_matrix(pred, target, normalize, save_path):
 
 if __name__ == "__main__":
 
-    config_dir = r'/home/xjz/Desktop/Coding/PycharmProjects/competition/kaggle/cassava_leaf_disease_classification/configs'
-    cofig_name = 'efficientnetb3Ranger_labelsmooth.py'
+    config_dir = r'/home/xjz/Desktop/Coding/PycharmProjects/competition/tianchi/LishuiYaogan_Sementation/configs'
+    cofig_name = 'Unet_Resnet50.py'
     # cofig_name = 'debug.py'
     config_path = os.path.join(config_dir, cofig_name)
     seed_everything(2020)
@@ -205,7 +329,7 @@ if __name__ == "__main__":
     shutil.copy(config_path, os.path.join(weight_folder, os.path.basename(config_path)))
     # get dataset length
     csv, index_generator = Get_fold_splits(cfg.kfold, cfg.dataset_entity)
-    pred_list, target_list = [], []
+    # pred_list, target_list = [], []
     # for  loop  code
     for n_fold, (train_index, test_index) in enumerate(index_generator, start=1):
         #  testing
@@ -240,18 +364,18 @@ if __name__ == "__main__":
             # confusion matrix
             pred, target = inferrence(model.model_layer, copy.deepcopy(trainer.val_dataloaders[0]))
 
-            plot_confusion_matrix(pred, target, normalize=False,
-                                  save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-                                                         'confusion_matrix.jpg'))
-            plot_confusion_matrix(pred, target, normalize=True,
-                                  save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-                                                         'confusion_matrix_normalize.jpg'))
+            # plot_confusion_matrix(pred, target, normalize=False,
+            #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+            #                                              'confusion_matrix.jpg'))
+            # plot_confusion_matrix(pred, target, normalize=True,
+            #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+            #                                              'confusion_matrix_normalize.jpg'))
             # add pred and target to global
-            pred_list.extend(pred)
-            target_list.extend(target)
+            # pred_list.extend(pred)
+            # target_list.extend(target)
 
         del model, trainer, checkpoint_callback
-    plot_confusion_matrix(pred_list, target_list, normalize=False,
-                          save_path=os.path.join(weight_folder, 'global_confusion_matrix.jpg'))
-    plot_confusion_matrix(pred_list, target_list, normalize=True,
-                          save_path=os.path.join(weight_folder, 'global_confusion_matrix_normalize.jpg'))
+    # plot_confusion_matrix(pred_list, target_list, normalize=False,
+    #                       save_path=os.path.join(weight_folder, 'global_confusion_matrix.jpg'))
+    # plot_confusion_matrix(pred_list, target_list, normalize=True,
+    #                       save_path=os.path.join(weight_folder, 'global_confusion_matrix_normalize.jpg'))

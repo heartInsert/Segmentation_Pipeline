@@ -1,13 +1,7 @@
-from codes.Mymodels.Resnet import Resnet50, Resnext50_32x4d, Seresnet50
-from codes.Mymodels.Efficientnet import efficientnet
-
-# from codes.Mymodels.Bert_chinese import Bert_Chinese_Model
+from codes.Mymodels.segmentation_models import segmentation_models
 
 model_dict = {
-    'Resnet50': Resnet50,
-    'efficientnet': efficientnet,
-    'Resnext50_32x4d': Resnext50_32x4d,
-    'Seresnet50': Seresnet50,
+    'segmentation_models_pytorch': segmentation_models
 }
 
 
