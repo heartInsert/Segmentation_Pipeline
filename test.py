@@ -34,6 +34,9 @@ for file in generate:
     data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
     label = cv2.imread(file)
     label = cv2.cvtColor(label, cv2.COLOR_BGR2GRAY)
+    temp = cv2.imread("img_dir.png", cv2.IMREAD_GRAYSCALE)
+    cv2.imwrite("img_dir.png", label, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
     transformed = transform(image=data, mask=label)
     transformed_image = transformed['image']
     transformed_mask = transformed['mask']

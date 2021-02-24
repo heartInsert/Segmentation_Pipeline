@@ -7,6 +7,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
+import glob
+import cv2
 
 
 def Get_predict_dataloader(cfg):
@@ -14,23 +16,39 @@ def Get_predict_dataloader(cfg):
     return DataLoader(dataset_val, batch_size=50, shuffle=False, num_workers=6, drop_last=False)
 
 
-def prediction(model, dataloader, predict_way) -> np.array:
+def prediction(model_list, dataloader, predict_way) -> np.array:
     with torch.no_grad():
-        model.cuda()
-        model.eval()
+        for model in model_list:
+            model.cuda()
+            model.eval()
         result = []
-        for index, img in enumerate(dataloader):
-            img = img.cuda()
-            pred = model(img)
-            if predict_way == 'cross_entropy':
-                pred = torch.softmax(pred, dim=1)
-            if predict_way == 'sigmoid':
-                pred = pred.sigmoid()
-            pred = pred.detach().cpu().numpy()
-            result.extend(pred)
+        for index, data in enumerate(dataloader):
+            img = data['img'].cuda()
+            file_paths = data['file_path']
+            for model in model_list:
+                pred = model(img)
+                if predict_way == 'cross_entropy':
+                    pred = pred.log_softmax(dim=1).exp()
+                if predict_way == 'sigmoid':
+                    pred = pred.log_sigmoid().exp()
+                pred = pred.detach().cpu().numpy()
+                result.append(pred)
             del pred
+            save_result(result, file_paths)
+
             pass
-    return np.stack(result)
+    return None
+
+
+def save_result(result, file_paths):
+    result = np.stack(result)
+    result = result.mean(axis=0)
+    result = result.argmax(axis=1)
+    result = result + 1
+    for index in range(len(result)):
+        img = result[0]
+        cv2.imwrite("img_dir.png", img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    pass
 
 
 def make_prediction(model_folder_path, model, dataloader, predict_way):
@@ -38,18 +56,12 @@ def make_prediction(model_folder_path, model, dataloader, predict_way):
     for fold_n in os.listdir(model_folder_path):
         if fold_n.startswith('fold_'):
             fold_n_path = os.path.join(model_folder_path, fold_n)
-            prediction_path = os.path.join(fold_n_path, 'prediction.csv')
             checkpoint_path = os.path.join(fold_n_path, 'checkpoints', 'best.ckpt')
-            if not os.path.exists(prediction_path):
-                model.load_state_dict(torch.load(checkpoint_path)['state_dict'], strict=True)
-                result = prediction(model, dataloader, predict_way)
-                csv = pd.DataFrame(data=result, columns=['key_{}'.format(i) for i in range(result.shape[1])])
-                csv.to_csv(prediction_path, index=0)
-                del result
-                gc.collect()
-            # read csv and make final  prediction
-            result_csv = pd.read_csv(prediction_path)
-            model_predict.append(result_csv.values)
+            model.load_state_dict(torch.load(checkpoint_path)['state_dict'], strict=True)
+            result = prediction(model, dataloader, predict_way)
+            model_predict.append(result)
+            del result
+            gc.collect()
     model_predict = np.stack(model_predict)
     return model_predict
 
@@ -58,9 +70,8 @@ import gc
 
 
 def main():
-    project_path = '/home/xjz/Desktop/Coding/PycharmProjects/competition/kaggle/cassava_leaf_disease_classification'
-    model_folders = ['2021_0210_10_0306_efficientnet']
-    data_csv = pd.read_csv('/home/xjz/Desktop/Coding/DL_Data/cassava_leaf_disease_classification/sample_submission.csv')
+    project_path = '/home/xjz/Desktop/Coding/PycharmProjects/competition/tianchi/LishuiYaogan_Sementation'
+    model_folders = ['2021_0224_20_2441_segmentation_models_pytorch']
 
     model_folder_paths = [os.path.join(project_path, 'model_weights', folder) for folder in model_folders]
     config_paths = []
@@ -73,26 +84,18 @@ def main():
     assert predict_way in ['cross_entropy', 'sigmoid']
     assert len(config_paths) == len(model_folders)
     final_predicts = []
-    for config_path, model_folder_path in tqdm(zip(config_paths, model_folder_paths), total=len(model_folders)):
+    generate = glob.glob(
+        os.path.join('/home/xjz/Desktop/Coding/DL_Data/LishuiYaogan/suichang_round1_test_partA_210120', '*.tif'))
+    file_list = [item for item in list(generate)]
+    csv = pd.DataFrame(file_list, columns=['file_path'])
+    cfg = Config.fromfile(config_paths[0])
+    cfg['dataset_entity_predict']['predict_csv'] = csv
+    dataloader = Get_predict_dataloader(cfg)
+    model_list = []
+    for config_path in config_paths:
         cfg = Config.fromfile(config_path)
-        model = model_call(cfg['model_entity'])
-        cfg.dataset_entity_predict['predict_csv'] = data_csv
-        dataloader = Get_predict_dataloader(cfg)
-
-        num_TTA = cfg.dataset_entity_predict.get('num_TTA', 1)
-        for TTA in range(num_TTA):
-            model_predict = make_prediction(model_folder_path, model, dataloader, predict_way)
-
-            final_predicts.append(model_predict)
-
-        del model, dataloader, model_predict
-        gc.collect()
-    final_predicts = np.concatenate(final_predicts).mean(axis=0)
-    predictions = np.argmax(final_predicts, axis=1)
-    data_csv['label'] = predictions
-    result_csv = data_csv
-    datetime_prefix = datetime.datetime.now().strftime("%Y_%m%d_%H_%M%S")
-    result_csv.to_csv(os.path.join(project_path, 'Results/{}_result.tsv'.format(datetime_prefix)), index=None)
+        model_list.append(model_call(cfg['model_entity']))
+    prediction(model_list, dataloader, predict_way)
 
     print('Done')
 

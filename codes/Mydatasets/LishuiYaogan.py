@@ -44,20 +44,20 @@ class Yaogan_dataset(data.Dataset):
 
 class Yaogan_dataset_predict_dataset(data.Dataset):
     def __init__(self, flag: str, kwargs):
+        assert flag == 'predict'
         self.kwargs = kwargs
         self.data_csv, self.data_transforms = None, None
-        self.flag_predict(kwargs)
-        self.data_folder_path = kwargs['data_folder_path']
-
-    def flag_predict(self, kwargs):
         self.data_csv = kwargs['predict_csv']
         self.data_transforms = kwargs['predict_transforms']
 
     def __getitem__(self, item):
         row = self.data_csv.iloc[item]
-        data_path = os.path.join(self.data_folder_path, row['image_id'])
-        img = self.data_transforms(data_path)
-        return img
+        file_path = row['file_path']
+        data = cv2.imread(file_path, cv2.IMREAD_ANYCOLOR)
+        data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
+        transformed = self.data_transforms(image=data)
+        transformed_image = transformed['image']
+        return {"img": transformed_image, "file_path": file_path}
 
     def __len__(self):
         return len(self.data_csv)
