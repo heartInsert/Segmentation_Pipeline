@@ -1,9 +1,10 @@
-from codes.Myloss_function.segematation import DiceLoss, SoftCrossEntropyLoss
+from codes.Myloss_function.segematation import DiceLoss, SoftCrossEntropyLoss, JaccardLoss
 import torch
 
 loss_dict = {
     "DiceLoss": DiceLoss,
-    "SoftCrossEntropyLoss": SoftCrossEntropyLoss
+    "SoftCrossEntropyLoss": SoftCrossEntropyLoss,
+    "jaccard": JaccardLoss,
 }
 
 

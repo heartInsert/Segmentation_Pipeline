@@ -44,9 +44,7 @@ if user_name == 'xjz':
             height, width),
         dataset_name='Yaogan_dataset',
         train_transforms=A.Compose([
-            A.RandomCrop(width=256, height=256),
             A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(p=0.2),
             A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2()
         ]),
@@ -63,11 +61,10 @@ dataset_entity_predict = dict(
     data_folder_path='/home/xjz/Desktop/Coding/DL_Data/cassava_leaf_disease_classification/test_images',
     dataset_name='Yaogan_dataset_predict_dataset',
     predict_transforms=A.Compose([
-        A.HorizontalFlip(p=0.5),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2()
     ]),
-    num_TTA=2,
+    num_TTA=1,
 )
 dataloader_entity = dict(
     batch_size=45,
@@ -78,7 +75,7 @@ dataloader_entity = dict(
 # Trainer setting
 trainer_entity = dict(
     gpus=1,
-    max_epochs=12 if Train_mode else 4,
+    max_epochs=20 if Train_mode else 4,
     check_val_every_n_epoch=1,
     deterministic=True,
     amp_level='O2',
@@ -86,16 +83,21 @@ trainer_entity = dict(
 )
 # loss setting
 loss_fc_entity = [
+    # dict(
+    #     loss_name="DiceLoss",
+    #     loss_args=dict(mode='multiclass'),
+    #     weight=1
+    # ),
     dict(
-        loss_name="DiceLoss",
+        loss_name="jaccard",
         loss_args=dict(mode='multiclass'),
-        weight=0.5
+        weight=1
     ),
-    dict(
-        loss_name="SoftCrossEntropyLoss",
-        loss_args=dict(smooth_factor=0.1),
-        weight=0.5
-    ),
+    # dict(
+    #     loss_name="SoftCrossEntropyLoss",
+    #     loss_args=dict(smooth_factor=0.1),
+    #     weight=0.5
+    # ),
 ]
 # optimizer setting
 optimzier_entity = dict(
@@ -115,7 +117,7 @@ lrschdule_entity = dict(
         last_epoch=-1
     ),
     SWA=dict(
-        SWA_enable=True,
+        SWA_enable=False,
         SWA_start_epoch=5,
     )
 )

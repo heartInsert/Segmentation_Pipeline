@@ -25,6 +25,7 @@ DiceLoss_fn = DiceLoss(mode='multiclass')
 SoftCrossEntropy_fn = SoftCrossEntropyLoss(smooth_factor=0.1)
 criterion = L.JointLoss(first=DiceLoss_fn, second=SoftCrossEntropy_fn,
                         first_weight=0.5, second_weight=0.5).cuda()
+label=cv2.imread('/home/xjz/Desktop/Coding/DL_Data/LishuiYaogan/results/000001.png')
 
 generate = glob.glob(r'/home/xjz/Desktop/Coding/DL_Data/LishuiYaogan/train_images_256_256/*.tif')
 for file in generate:

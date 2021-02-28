@@ -9,6 +9,7 @@ import pytorch_lightning as pl
 from codes.Mymodels import model_call
 from codes.Mydatasets import dataset_call
 from codes.Myoptimizers import optimizer_call
+
 from codes.Mylr_schedule import lrschdule_call
 from pytorch_lightning.metrics.metric import Metric
 from torch.optim.swa_utils import AveragedModel
@@ -333,48 +334,48 @@ if __name__ == "__main__":
     # for  loop  code
     for n_fold, (train_index, test_index) in enumerate(index_generator, start=1):
         #  testing
+        if n_fold <= 1:
+            if cfg.Train_mode is False:
+                train_index = train_index[:200]
+                test_index = test_index[:200]
+            cfg['dataset_entity']['train_csv'] = csv.iloc[train_index]
+            cfg['dataset_entity']['test_csv'] = csv.iloc[test_index]
 
-        if cfg.Train_mode is False:
-            train_index = train_index[:200]
-            test_index = test_index[:200]
-        cfg['dataset_entity']['train_csv'] = csv.iloc[train_index]
-        cfg['dataset_entity']['test_csv'] = csv.iloc[test_index]
+            model = LitMNIST(cfg)
+            checkpoint_callback = pl.callbacks.ModelCheckpoint(**cfg.logger_entity.ModelCheckpoint)
+            tb_logger = loggers.TensorBoardLogger(save_dir=cfg.logger_entity['weight_savepath'], name=experiment_name,
+                                                  version='fold_{}'.format(n_fold))
+            cfg.trainer_entity['checkpoint_callback'] = checkpoint_callback
+            cfg.trainer_entity['logger'] = tb_logger
+            trainer = Trainer(**cfg.trainer_entity)
+            trainer.fit(model)
+            if cfg.Train_mode is not None:
+                model_pth_name = os.path.basename(checkpoint_callback.best_model_path)
+                best_model_path = checkpoint_callback.best_model_path.replace(model_pth_name, 'best.ckpt')
+                if model.SWA_enable:
+                    print('SWA save')
+                    update_bn(trainer.train_dataloader, model.SWA_model)
+                    model.model_layer.load_state_dict(model.SWA_model.module.state_dict())
+                else:
+                    model.load_state_dict(torch.load(checkpoint_callback.best_model_path)['state_dict'], strict=True)
+                torch.save({"state_dict": model.model_layer.state_dict()}, best_model_path)
 
-        model = LitMNIST(cfg)
-        checkpoint_callback = pl.callbacks.ModelCheckpoint(**cfg.logger_entity.ModelCheckpoint)
-        tb_logger = loggers.TensorBoardLogger(save_dir=cfg.logger_entity['weight_savepath'], name=experiment_name,
-                                              version='fold_{}'.format(n_fold))
-        cfg.trainer_entity['checkpoint_callback'] = checkpoint_callback
-        cfg.trainer_entity['logger'] = tb_logger
-        trainer = Trainer(**cfg.trainer_entity)
-        trainer.fit(model)
-        if cfg.Train_mode is not None:
-            model_pth_name = os.path.basename(checkpoint_callback.best_model_path)
-            best_model_path = checkpoint_callback.best_model_path.replace(model_pth_name, 'best.ckpt')
-            if model.SWA_enable:
-                print('SWA save')
-                update_bn(trainer.train_dataloader, model.SWA_model)
-                model.model_layer.load_state_dict(model.SWA_model.module.state_dict())
-            else:
-                model.load_state_dict(torch.load(checkpoint_callback.best_model_path)['state_dict'], strict=True)
-            torch.save({"state_dict": model.model_layer.state_dict()}, best_model_path)
+                # delete original
+                os.remove(checkpoint_callback.best_model_path)
+                # confusion matrix
+                pred, target = inferrence(model.model_layer, copy.deepcopy(trainer.val_dataloaders[0]))
 
-            # delete original
-            os.remove(checkpoint_callback.best_model_path)
-            # confusion matrix
-            pred, target = inferrence(model.model_layer, copy.deepcopy(trainer.val_dataloaders[0]))
+                # plot_confusion_matrix(pred, target, normalize=False,
+                #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+                #                                              'confusion_matrix.jpg'))
+                # plot_confusion_matrix(pred, target, normalize=True,
+                #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
+                #                                              'confusion_matrix_normalize.jpg'))
+                # add pred and target to global
+                # pred_list.extend(pred)
+                # target_list.extend(target)
 
-            # plot_confusion_matrix(pred, target, normalize=False,
-            #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-            #                                              'confusion_matrix.jpg'))
-            # plot_confusion_matrix(pred, target, normalize=True,
-            #                       save_path=os.path.join(os.path.dirname(checkpoint_callback.dirpath),
-            #                                              'confusion_matrix_normalize.jpg'))
-            # add pred and target to global
-            # pred_list.extend(pred)
-            # target_list.extend(target)
-
-        del model, trainer, checkpoint_callback
+            del model, trainer, checkpoint_callback
     # plot_confusion_matrix(pred_list, target_list, normalize=False,
     #                       save_path=os.path.join(weight_folder, 'global_confusion_matrix.jpg'))
     # plot_confusion_matrix(pred_list, target_list, normalize=True,
